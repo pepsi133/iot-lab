@@ -10,3 +10,13 @@ its own, from a shell or a script. Agent skills that drive these tools are in
 
 Each directory has its own README with the install steps, the requirements and
 the measured behavior of the device.
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+Copyright 2026 Robert Żegleń. Licensed under the
+[Apache License 2.0](LICENSE). If you distribute this code or a work based on
+it, keep the [NOTICE](NOTICE) file, which names the author.
