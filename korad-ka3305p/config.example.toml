@@ -1,0 +1,20 @@
+# Copy to ~/.config/korad/config.toml. `korad daemon reload` rereads it.
+poll_hz = 5                      # number, or "max" for no pause between polls
+setpoint_every_s = 1.0           # how often the poller reads VSET/ISET
+on_live_violation = "off"        # off | warn : setpoint breaks the guard while the output is ON
+on_recall_violation = "zero"     # zero | warn : a preset loads values above the guard
+stop_action = "off_and_zero"     # off_and_zero | off
+no_guard_warning = true
+today_ends = "10:00"             # local time at which a --today guard expires
+port = ""                        # empty: find usb_id in sysfs (searched again on every reconnect)
+usb_id = "0416:5011"             # VID:PID of the supply (hex)
+usb_serial = ""                  # USB serial of YOUR supply, e.g. "ABC123"; empty: the only usb_id
+                                 # device (refused when several with different serials are connected)
+# usbipd_reattach = "wsl"        # off | wsl. Default: wsl under WSL when usbipd.exe is found, else off
+usbipd_path = ""                 # empty: usbipd.exe on PATH, else the default install path
+autostart = true                 # commands start the daemon when none answers
+idle_stop_after_s = 300          # daemon exits after this long with the supply absent AND no
+                                 # active guard; 0 = never
+fake = false                     # true: simulated supply (tests, demos); never touches a port
+wait_for_device_s = 15           # a command waits this long for an absent supply, printing each
+                                 # step; 0 = answer at once (same as --no-wait)
