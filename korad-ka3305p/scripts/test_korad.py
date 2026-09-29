@@ -687,10 +687,6 @@ class DaemonLiveWarn(DaemonCase):
 
 # ---------------------------------------------------------------- CLI
 
-HAS_CLI = "def main" in (HERE / "korad.py").read_text()
-
-
-@unittest.skipUnless(HAS_CLI, "korad.py has no main() yet (the CLI is being written)")
 class Cli(DaemonCase):
     def run_cli(self, *args, stdin=""):
         env = dict(os.environ)
@@ -728,21 +724,21 @@ class Cli(DaemonCase):
 
 
 
-# ---------------------------------------------------------------- design-review regressions
+# ---------------------------------------------------------------- input validation, guard edge cases, monitor keys, CLI messages
 
 import argparse  # noqa: E402
 
 import monitor  # noqa: E402
 
 
-class ReviewUnits(unittest.TestCase):
-    def test_r10_unit_confusion_hint(self):
+class InputAndGuardUnits(unittest.TestCase):
+    def test_unit_confusion_hint(self):
         for text, kind, hint in (("50", "i", "did you mean 50mA?"), ("5000", "v", "did you mean 5000mV?")):
             with self.assertRaises(k.KoradError) as cm:
                 k.parse_value(text, kind)
             self.assertIn(hint, cm.exception.message)
 
-    def test_r10_no_hint_with_a_unit_or_when_mv_is_still_invalid(self):
+    def test_no_hint_with_a_unit_or_when_mv_is_still_invalid(self):
         with self.assertRaises(k.KoradError) as cm:
             k.parse_value("50A", "i")
         self.assertNotIn("did you mean", cm.exception.message)
@@ -750,27 +746,27 @@ class ReviewUnits(unittest.TestCase):
             k.parse_value("99999", "v")          # 99.999 V is finer than 10 mV and too high
         self.assertNotIn("did you mean", cm.exception.message)
 
-    def test_r3_guard_duration_needs_a_unit(self):
+    def test_guard_duration_needs_a_unit(self):
         with self.assertRaises(k.KoradError) as cm:
             k.parse_guard_duration("4")
         self.assertIn("no unit", cm.exception.message)
         self.assertEqual(k.parse_guard_duration("4h"), 4 * 3600)
         self.assertEqual(k.parse_duration("4"), 4.0)   # elsewhere a bare number stays seconds
 
-    def test_r3_guard_window_minimum_and_past(self):
+    def test_guard_window_minimum_and_past(self):
         for hours in (-1, 30 / 3600):
             with self.assertRaises(k.KoradError):
                 k.validate_guard_window(guard({"all": {"max_cv": 330}}, hours=hours))
         k.validate_guard_window(guard({"all": {"max_cv": 330}}, hours=2 / 60))
 
-    def test_r6_confirm_word_format_without_the_word(self):
+    def test_confirm_word_format_without_the_word(self):
         self.assertIn("2 decimals", k._word_kind("12.00"))
         self.assertIn("3 decimals", k._word_kind("0.500"))
         self.assertIn("HH:MM", k._word_kind("18:00"))
         for w in ("12.00", "0.500", "18:00"):
             self.assertNotIn(w, k._word_kind(w))
 
-    def test_r11_today_under_one_hour_warns(self):
+    def test_today_under_one_hour_warns(self):
         soon = (dt.datetime.now() + dt.timedelta(minutes=30)).strftime("%H:%M")
         out = k.Out(False, "guard")
         a = argparse.Namespace(for_=None, until=None, today=True, _out=out)
@@ -781,8 +777,8 @@ class ReviewUnits(unittest.TestCase):
         self.assertIn("--today ends at", err.getvalue())
 
 
-class ReviewMonitorKeys(unittest.TestCase):
-    def test_r5_double_press_fires_after_settle(self):
+class MonitorKeys(unittest.TestCase):
+    def test_double_press_fires_after_settle(self):
         st = monitor.UIState(setpoints=sp())
         self.assertEqual(monitor.handle_key(st, "y", 100.0), [])
         self.assertEqual(monitor.handle_key(st, "y", 100.4), [])
@@ -790,7 +786,7 @@ class ReviewMonitorKeys(unittest.TestCase):
         self.assertEqual(monitor.tick(st, 100.53), [("out", True)])
         self.assertEqual(monitor.tick(st, 100.6), [])
 
-    def test_r5_auto_repeat_never_turns_on(self):
+    def test_auto_repeat_never_turns_on(self):
         st = monitor.UIState(setpoints=sp())
         t = 100.0
         acts = monitor.handle_key(st, "y", t)
@@ -798,7 +794,7 @@ class ReviewMonitorKeys(unittest.TestCase):
         acts += monitor.handle_key(st, "y", t)            # fast repeat
         self.assertEqual(acts + monitor.tick(st, t + 0.5), [])
 
-    def test_r5_held_key_with_slow_first_repeat_never_turns_on(self):
+    def test_held_key_with_slow_first_repeat_never_turns_on(self):
         st = monitor.UIState(setpoints=sp())
         acts = monitor.handle_key(st, "t", 100.0)
         acts += monitor.handle_key(st, "t", 100.4)        # first repeat after the repeat delay
@@ -808,15 +804,15 @@ class ReviewMonitorKeys(unittest.TestCase):
         acts += monitor.tick(st, 102.0)
         self.assertNotIn(("out", True), acts)
 
-    def test_r11_coarse_key_step_capped(self):
+    def test_coarse_key_step_capped(self):
         st = monitor.UIState(setpoints=sp(v1=100), step=2)
         self.assertEqual(monitor.handle_key(st, "K", 0.0), [("set", 1, "v", 600)])
         st = monitor.UIState(setpoints=sp(i1=10), step=2, field="i")
         self.assertEqual(monitor.handle_key(st, "D", 0.0), [("set", 1, "i", 510)])
 
 
-class ReviewDaemon(DaemonCase):
-    def test_r1_flood_does_not_starve_live_check(self):
+class GuardEdgeCases(DaemonCase):
+    def test_flood_does_not_starve_live_check(self):
         self.c.call("set", channel="12", v=300, i=50)
         self.set_guard(guard({"all": {"max_cv": 500}}))
         self.c.call("out", on=True)
@@ -846,7 +842,7 @@ class ReviewDaemon(DaemonCase):
         self.assertTrue(off, "output stayed ON under a command flood")
         self.assertLess(took, 1.5)
 
-    def test_r2_leaving_series_is_never_refused(self):
+    def test_leaving_series_is_never_refused(self):
         self.c.call("set", channel="2", v=500, i=100)
         self.c.call("mode", mode="series")
         self.set_guard(guard({"1": {"max_cv": 330}, "2": {"max_cv": 1200}}))
@@ -856,12 +852,12 @@ class ReviewDaemon(DaemonCase):
         e = self.err("out", on=True)
         self.assertEqual(e.code, "E_GUARD")
 
-    def test_r3_daemon_refuses_expired_guard(self):
+    def test_daemon_refuses_expired_guard(self):
         e = self.err("guard_set", guard=guard({"all": {"max_cv": 330}}, hours=-0.1))
         self.assertEqual(e.code, "E_USAGE")
         self.assertIsNone(self.daemon.guard)
 
-    def test_r4_partial_set_reported_and_audited(self):
+    def test_partial_set_reported_and_audited(self):
         real_write = self.fake.write
 
         def drop_vset2(data):
@@ -880,7 +876,7 @@ class ReviewDaemon(DaemonCase):
         audit = (Path(self.tmp.name) / "state" / "audit.jsonl").read_text()
         self.assertIn('"kind": "set-partial"', audit)
 
-    def test_r6_confirm_error_states_format(self):
+    def test_confirm_error_states_format(self):
         self.set_guard(guard({"all": {"max_cv": 330}}))
         new = guard({"all": {"max_cv": 1200}})
         e = self.err("guard_set", guard=new, confirm="12")
@@ -888,7 +884,7 @@ class ReviewDaemon(DaemonCase):
         self.assertIn("2 decimals", e.message)
         self.assertNotIn("12.00", e.message)
 
-    def test_r8_out_off_with_device_absent_says_output_may_be_on(self):
+    def test_out_off_with_device_absent_says_output_may_be_on(self):
         def fail_open():
             raise OSError("gone")
         self.daemon._open = fail_open
@@ -898,13 +894,13 @@ class ReviewDaemon(DaemonCase):
         self.assertEqual(e.code, "E_DEVICE")
         self.assertIn("may still be ON", e.message)
 
-    def test_r9_refusal_names_the_other_channel_fix(self):
+    def test_refusal_names_the_other_channel_fix(self):
         self.set_guard(guard({"all": {"max_cv": 500}}))
         # the fake starts with CH1 at 30.00 V
         e = self.err("set", channel="2", v=300)
         self.assertIn("next step: lower CH1 first: korad set 1 -v 5.00", e.message)
 
-    def test_s1_out_on_refused_when_other_channel_unlimited(self):
+    def test_out_on_refused_when_other_channel_unlimited(self):
         self.c.call("set", channel="2", v=330, i=50)
         self.set_guard(guard({"2": {"max_cv": 500}}))
         e = self.err("out", on=True)
@@ -914,7 +910,7 @@ class ReviewDaemon(DaemonCase):
         self.c.call("out", on=True)
         self.assertTrue(self.fake.out)
 
-    def test_s1_live_unlimited_channel_turns_output_off(self):
+    def test_live_unlimited_channel_turns_output_off(self):
         self.c.call("set", channel="1", v=0)
         self.c.call("set", channel="2", v=330, i=50)
         self.set_guard(guard({"2": {"max_cv": 500}}))
@@ -923,18 +919,17 @@ class ReviewDaemon(DaemonCase):
             self.fake.v[1] = 1200
         self.assertTrue(self.wait_for(lambda: not self.fake.out, timeout=2))
 
-    def test_s1_current_only_guard_counts_as_a_limit(self):
+    def test_current_only_guard_counts_as_a_limit(self):
         self.c.call("set", channel="12", v=330, i=50)
         self.set_guard(guard({"all": {"max_ma": 100}}))
         self.c.call("out", on=True)
         self.assertTrue(self.fake.out)
 
 
-@unittest.skipUnless(HAS_CLI, "korad.py has no main() yet")
-class ReviewCli(DaemonCase):
+class CliMessages(DaemonCase):
     run_cli = Cli.run_cli
 
-    def test_r3_cli_bare_for_refused(self):
+    def test_cli_bare_for_refused(self):
         r = self.run_cli("guard", "set", "-v", "3.3", "--for", "4")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("no unit", r.stderr)
@@ -942,24 +937,24 @@ class ReviewCli(DaemonCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIsNone(self.daemon.guard)
 
-    def test_r10_cli_hint(self):
+    def test_cli_hint(self):
         r = self.run_cli("set", "2", "-i", "50")
         self.assertEqual(r.returncode, 2)
         self.assertIn("did you mean 50mA?", r.stderr)
 
-    def test_s2_guard_show_none_once(self):
+    def test_guard_show_none_once(self):
         r = self.run_cli("guard")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.count("NONE"), 1, r.stdout)
         self.assertEqual(r.stderr.strip(), "", r.stderr)
 
-    def test_r7_daemon_stop_ok_matches_pid(self):
+    def test_daemon_stop_ok_matches_pid(self):
         r = self.run_cli("--json", "daemon", "stop")
         self.assertEqual(r.returncode, 0, r.stderr)
         env = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertEqual(env["data"]["stop_event"]["pid"], os.getpid())
 
-    def test_r7_daemon_stop_failed_exit_5(self):
+    def test_daemon_stop_failed_exit_5(self):
         def fail_open():
             raise OSError("gone")
         self.daemon._open = fail_open
@@ -971,7 +966,7 @@ class ReviewCli(DaemonCase):
 
 
 
-# ---------------------------------------------------------------- live-test regressions
+# ---------------------------------------------------------------- request ordering, port exclusivity, JSON output
 
 import errno  # noqa: E402
 import fcntl  # noqa: E402
@@ -986,8 +981,8 @@ def _err(fn, *args, **kw):
     raise AssertionError(f"{fn.__name__}{args} did not raise KoradError")
 
 
-class LiveUnits(unittest.TestCase):
-    def test_l20_unicode_digits_refused(self):
+class InputHardening(unittest.TestCase):
+    def test_unicode_digits_refused(self):
         for fn, arg in [(lambda s: k.parse_value(s, "v"), "３.３"), (lambda s: k.parse_value(s, "v"), "٣.٣"),
                         (lambda s: k.parse_value(s, "i"), "５0mA"), (k.parse_duration, "１h"),
                         (k.parse_guard_duration, "１h"), (k.next_local_time, "٠٩:٠٠"),
@@ -995,25 +990,25 @@ class LiveUnits(unittest.TestCase):
             with self.subTest(arg=arg):
                 self.assertEqual(_err(fn, arg).code, "E_USAGE")
 
-    def test_l20_mega_units_refused(self):
+    def test_mega_units_refused(self):
         for text, kind in [("3300MV", "v"), ("5Mv", "v"), ("50MA", "i"), ("50Ma", "i")]:
             with self.subTest(text=text):
                 e = _err(k.parse_value, text, kind)
                 self.assertIn("mega", e.message)
 
-    def test_l20_space_before_unit_ok_control_chars_refused(self):
+    def test_space_before_unit_ok_control_chars_refused(self):
         self.assertEqual(k.parse_value("3.3 V", "v"), 330)
         self.assertEqual(k.parse_value(" 50 mA ", "i"), 50)
         for text in ("3.3\n", "\t3.3", "3.3\r", "+3.3", "3,3"):
             with self.subTest(text=repr(text)):
                 self.assertEqual(_err(k.parse_value, text, "v").code, "E_USAGE")
 
-    def test_l20_guard_for_capped_at_30_days(self):
+    def test_guard_for_capped_at_30_days(self):
         self.assertEqual(k.parse_guard_duration("720h"), 720 * 3600)
         self.assertIn("30 days", _err(k.parse_guard_duration, "721h").message)
         self.assertEqual(_err(k.parse_guard_duration, "99999999h").code, "E_USAGE")
 
-    def test_l4_poll_validation(self):
+    def test_poll_validation(self):
         for bad in (0.001, 0.5, "0.5", "nan", "inf", float("nan"), float("inf"), True, "1e3", "", -5):
             with self.subTest(bad=bad):
                 self.assertEqual(_err(k.check_poll, bad).code, "E_USAGE")
@@ -1024,7 +1019,7 @@ class LiveUnits(unittest.TestCase):
             cfgp.write_text("poll_hz = 0.5\n")
             self.assertEqual(_err(k.load_config, cfgp).code, "E_USAGE")
 
-    def test_l32_guard_shape(self):
+    def test_guard_shape(self):
         good = guard({"all": {"max_cv": 500, "max_ma": 50}})
         self.assertIs(k.check_guard_shape(good), good)
         written = dict(good, version=1, set_at_utc=dt.datetime.now(UTC).isoformat())  # as the CLI writes it
@@ -1038,7 +1033,7 @@ class LiveUnits(unittest.TestCase):
                 self.assertEqual(_err(k.check_guard_shape, bad).code, "E_USAGE")
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores TIOCEXCL")
-    def test_l11_tiocexcl_blocks_a_second_open(self):
+    def test_tiocexcl_blocks_a_second_open(self):
         master, slave = os.openpty()
         try:
             name = os.ttyname(slave)
@@ -1051,7 +1046,7 @@ class LiveUnits(unittest.TestCase):
             os.close(slave)
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores TIOCEXCL")
-    def test_l11_busy_port_is_reported_as_busy_not_absent(self):
+    def test_busy_port_is_reported_as_busy_not_absent(self):
         try:
             import serial  # noqa: F401
         except ImportError:
@@ -1078,7 +1073,7 @@ class LiveUnits(unittest.TestCase):
             tmp.cleanup()
 
 
-class LiveDaemon(DaemonCase):
+class RequestOrdering(DaemonCase):
     def _block(self, seconds):
         """Hold the device thread for `seconds`; returns the gate to release it early."""
         gate = threading.Event()
@@ -1103,7 +1098,7 @@ class LiveDaemon(DaemonCase):
         th.start()
         return res, th
 
-    def test_l1_older_on_dropped_after_newer_off(self):
+    def test_older_on_dropped_after_newer_off(self):
         self.c.call("set", channel="2", v=300, i=20)
         gate, blk = self._block(5)
         on, t_on = self._call_bg("out", on=True)
@@ -1119,7 +1114,7 @@ class LiveDaemon(DaemonCase):
         self.assertFalse(self.fake.out)
         self.assertEqual(k.EXIT["E_SUPERSEDED"], 7)
 
-    def test_l1_on_queued_too_long_dropped(self):
+    def test_on_queued_too_long_dropped(self):
         self.c.call("set", channel="2", v=300, i=20)
         gate, blk = self._block(2.6)
         on, t_on = self._call_bg("out", on=True)
@@ -1129,7 +1124,7 @@ class LiveDaemon(DaemonCase):
         self.assertIn("queued too long", on["err"].message)
         self.assertFalse(self.fake.out)
 
-    def test_l1_newer_on_after_off_runs(self):
+    def test_newer_on_after_off_runs(self):
         self.c.call("set", channel="2", v=300, i=20)
         gate, blk = self._block(5)
         off, t_off = self._call_bg("out", on=False)
@@ -1142,7 +1137,7 @@ class LiveDaemon(DaemonCase):
         self.assertIn("data", on, on.get("err") and on["err"].message)
         self.assertTrue(self.fake.out)
 
-    def test_l2_request_of_a_dead_client_is_not_run(self):
+    def test_request_of_a_dead_client_is_not_run(self):
         gate, blk = self._block(5)
         s = socket.socket(socket.AF_UNIX)
         s.connect(str(k.socket_path()))
@@ -1156,7 +1151,7 @@ class LiveDaemon(DaemonCase):
         self.assertNotEqual(self.fake.v[2], 123)
         self.assertTrue(any("disconnected" in e["message"] for e in self.events("dropped")))
 
-    def test_l2_off_of_a_dead_client_still_runs(self):
+    def test_off_of_a_dead_client_still_runs(self):
         self.c.call("set", channel="2", v=300, i=20)
         self.c.call("out", on=True)
         gate, blk = self._block(5)
@@ -1169,7 +1164,7 @@ class LiveDaemon(DaemonCase):
         blk.join(timeout=10)
         self.assertTrue(self.wait_for(lambda: not self.fake.out))
 
-    def test_l3_submit_timeout_cancels_the_command(self):
+    def test_submit_timeout_cancels_the_command(self):
         gate, blk = self._block(5)
         ran = []
         e = _err(self.daemon.submit, lambda: ran.append(1), timeout=0.3)
@@ -1180,7 +1175,7 @@ class LiveDaemon(DaemonCase):
         time.sleep(0.3)
         self.assertEqual(ran, [])
 
-    def test_l3_client_socket_timeout(self):
+    def test_client_socket_timeout(self):
         old = k.Client.TIMEOUT_S
         k.Client.TIMEOUT_S = 0.5
         try:
@@ -1194,12 +1189,12 @@ class LiveDaemon(DaemonCase):
         finally:
             k.Client.TIMEOUT_S = old
 
-    def test_l4_reload_keeps_poll_override(self):
+    def test_reload_keeps_poll_override(self):
         self.daemon.poll_override = "max"
         self.c.call("reload")
         self.assertEqual(self.daemon.cfg["poll_hz"], "max")
 
-    def test_l5_set_while_on_refused_for_an_unguarded_channel(self):
+    def test_set_while_on_refused_for_an_unguarded_channel(self):
         self.c.call("set", channel="2", v=0)
         self.c.call("set", channel="1", v=200, i=20)
         self.set_guard(guard({"1": {"max_cv": 300, "max_ma": 50}}))
@@ -1209,7 +1204,7 @@ class LiveDaemon(DaemonCase):
         self.assertIn("no limit", e.message)
         self.assertEqual(self.fake.v[2], 0)
 
-    def test_l6_recall_zero_sets_voltage_and_current(self):
+    def test_recall_zero_sets_voltage_and_current(self):
         self.fake.mem[3] = (3100, 5100, 3100, 5100)
         self.set_guard(guard({"all": {"max_cv": 500, "max_ma": 50}}))
         e = self.err("preset", n=3)
@@ -1217,7 +1212,7 @@ class LiveDaemon(DaemonCase):
         self.assertEqual((self.fake.v[1], self.fake.i[1], self.fake.v[2], self.fake.i[2]), (0, 10, 0, 10))
         self.assertIn("CH1 0.00 V 0.010 A, CH2 0.00 V 0.010 A", e.message)
 
-    def test_l9_expiry_emits_one_event_and_a_warning_when_on(self):
+    def test_expiry_emits_one_event_and_a_warning_when_on(self):
         self.c.call("set", channel="12", v=300, i=20)
         self.set_guard(guard({"all": {"max_cv": 500, "max_ma": 50}}))
         self.c.call("out", on=True)
@@ -1227,7 +1222,7 @@ class LiveDaemon(DaemonCase):
         time.sleep(0.3)
         self.assertEqual(sum("expired" in e["message"] for e in self.events("guard")), 1)
 
-    def test_l11_second_daemon_for_the_same_supply_refused(self):
+    def test_second_daemon_for_the_same_supply_refused(self):
         old = os.environ.get("KORAD_SOCKET")
         os.environ["KORAD_SOCKET"] = str(Path(self.tmp.name) / "second.sock")
         try:
@@ -1242,13 +1237,13 @@ class LiveDaemon(DaemonCase):
             else:
                 os.environ["KORAD_SOCKET"] = old
 
-    def test_l11_safe_stop_logs_no_false_panel_event(self):
+    def test_safe_stop_logs_no_false_panel_event(self):
         self.c.call("set", channel="12", v=300, i=20)
         self.daemon.safe_stop("test")
         time.sleep(0.3)
         self.assertFalse(self.events("panel"))
 
-    def test_l13_partial_set_labels_every_write(self):
+    def test_partial_set_labels_every_write(self):
         real_write = self.fake.write
 
         def drop_vset1(data):
@@ -1263,7 +1258,7 @@ class LiveDaemon(DaemonCase):
         self.assertIn("VSET2=5.00 V: not sent", e.message)
         self.assertIn("Read-back now", e.message)
 
-    def test_l32_bad_guard_file_reload_keeps_previous_guard(self):
+    def test_bad_guard_file_reload_keeps_previous_guard(self):
         g = guard({"all": {"max_cv": 500}})
         self.set_guard(g)
         gf = Path(self.tmp.name) / "state" / "guard.json"
@@ -1279,8 +1274,8 @@ class LiveDaemon(DaemonCase):
         gf.write_text(json.dumps(g))
 
 
-class LiveMessages(unittest.TestCase):
-    def test_l21_stale_socket_message(self):
+class SocketMessages(unittest.TestCase):
+    def test_stale_socket_message(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as d:
             path = Path(d) / "k.sock"
             s = socket.socket(socket.AF_UNIX)
@@ -1290,7 +1285,7 @@ class LiveMessages(unittest.TestCase):
             self.assertIn("stale socket", e.message)
             self.assertIn("daemon start", e.message)
 
-    def test_l21_closed_connection_message(self):
+    def test_closed_connection_message(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as d:
             path = Path(d) / "k.sock"
             srv = socket.socket(socket.AF_UNIX)
@@ -1311,7 +1306,7 @@ class LiveMessages(unittest.TestCase):
             srv.close()
 
 
-class LiveCli(DaemonCase):
+class JsonCli(DaemonCase):
     run_cli = Cli.run_cli
 
     def one_json(self, r):
@@ -1320,12 +1315,12 @@ class LiveCli(DaemonCase):
         self.assertNotIn("Traceback", r.stderr)
         return json.loads(lines[0])
 
-    def test_l20_json_after_the_command(self):
+    def test_json_after_the_command(self):
         r = self.run_cli("status", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.one_json(r)["ok"])
 
-    def test_l20_json_alone_and_help(self):
+    def test_json_alone_and_help(self):
         r = self.run_cli("--json")
         self.assertEqual(r.returncode, 2)
         self.assertEqual(self.one_json(r)["error"]["code"], "E_USAGE")
@@ -1335,7 +1330,7 @@ class LiveCli(DaemonCase):
         r = self.run_cli("set", "--help", "--json")
         self.assertIn("--voltage", self.one_json(r)["data"]["help"])
 
-    def test_l20_usage_errors_are_json(self):
+    def test_usage_errors_are_json(self):
         for args in (["set", "2", "-v", "5", "-v", "3"], ["preset", "٥"], ["set", "１", "-v", "1"],
                      ["guard", "set", "-v", "3", "--for", "99999999h"], ["set", "2", "-v", "3300MV"],
                      ["log", "-f", "/nonexistent/x.csv", "--duration", "1s"],
@@ -1346,12 +1341,12 @@ class LiveCli(DaemonCase):
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertEqual(self.one_json(r)["error"]["code"], "E_USAGE")
 
-    def test_l20_repeated_option_message(self):
+    def test_repeated_option_message(self):
         r = self.run_cli("set", "2", "-v", "5", "-v", "3")
         self.assertEqual(r.returncode, 2)
         self.assertIn("twice", r.stderr)
 
-    def test_l20_internal_error_is_json_not_traceback(self):
+    def test_internal_error_is_json_not_traceback(self):
         orig = k.cmd_status
 
         def boom(a, out):
@@ -1368,7 +1363,7 @@ class LiveCli(DaemonCase):
         self.assertEqual(env["error"]["code"], "E_INTERNAL")
         self.assertIn("synthetic", env["error"]["message"])
 
-    def test_l12_status_exits_5_while_the_device_is_absent(self):
+    def test_status_exits_5_while_the_device_is_absent(self):
         def fail_open():
             raise OSError("gone")
         self.daemon._open = fail_open
@@ -1395,9 +1390,9 @@ class LiveCli(DaemonCase):
 
 
 
-# ---------------------------------------------------------------- attended live regressions
+# ---------------------------------------------------------------- clock jumps, pending OFF, start report, measured VOUT
 
-class AttendedDaemon(DaemonCase):
+class ClockAndPendingOff(DaemonCase):
     def _absent(self):
         def fail_open():
             raise OSError("gone")
@@ -1422,7 +1417,7 @@ class AttendedDaemon(DaemonCase):
         k.now_local = lambda: real_now() + dt.timedelta(seconds=seconds)
         return real_wall, real_now
 
-    def test_l2_1_forward_clock_jump_is_reported_and_names_the_expired_guard(self):
+    def test_forward_clock_jump_is_reported_and_names_the_expired_guard(self):
         self.set_guard(guard({"all": {"max_cv": 500}}, hours=0.5))
         time.sleep(0.2)
         saved = self._jump(4 * 3600)
@@ -1439,7 +1434,7 @@ class AttendedDaemon(DaemonCase):
         finally:
             k.wall_time, k.now_local = saved
 
-    def test_l2_1_backward_clock_jump_is_reported_guard_kept(self):
+    def test_backward_clock_jump_is_reported_guard_kept(self):
         self.set_guard(guard({"all": {"max_cv": 500}}, hours=0.5))
         time.sleep(0.2)
         saved = self._jump(-120)
@@ -1452,7 +1447,7 @@ class AttendedDaemon(DaemonCase):
         finally:
             k.wall_time, k.now_local = saved
 
-    def test_l2_1_small_drift_is_not_a_jump(self):
+    def test_small_drift_is_not_a_jump(self):
         saved = self._jump(30)
         try:
             time.sleep(0.5)
@@ -1460,7 +1455,7 @@ class AttendedDaemon(DaemonCase):
         finally:
             k.wall_time, k.now_local = saved
 
-    def test_l2_2_pending_off_applied_after_reconnect(self):
+    def test_pending_off_applied_after_reconnect(self):
         self.c.call("set", channel="2", v=300, i=20)
         self.c.call("out", on=True)
         self._absent()
@@ -1473,7 +1468,7 @@ class AttendedDaemon(DaemonCase):
                                                   for ev in self.events("out")), 3))
         self.assertFalse(self.fake.out)
 
-    def test_l2_2_pending_off_superseded_by_a_newer_on(self):
+    def test_pending_off_superseded_by_a_newer_on(self):
         self.c.call("set", channel="2", v=300, i=20)
         self.c.call("out", on=True)
         self._absent()
@@ -1484,7 +1479,7 @@ class AttendedDaemon(DaemonCase):
                                                   for ev in self.events("out")), 3))
         self.assertTrue(self.fake.out)
 
-    def test_l2_3_startup_reports_output_on_and_turns_it_off_under_the_guard(self):
+    def test_startup_reports_output_on_and_turns_it_off_under_the_guard(self):
         self.set_guard(guard({"all": {"max_cv": 500}}))
         self.fake.v[1], self.fake.v[2], self.fake.out = 0, 900, True
         rep = self.daemon.submit(self.daemon._startup_check)
@@ -1496,7 +1491,7 @@ class AttendedDaemon(DaemonCase):
         self.assertIn("the startup rule turned the output OFF: CH2 9.00 V", text)
         self.assertEqual(self.c.call("ping")["start_report"]["turned_off"], True)
 
-    def test_l2_3_startup_reports_output_on_left_on_without_a_guard(self):
+    def test_startup_reports_output_on_left_on_without_a_guard(self):
         self.fake.v[1], self.fake.v[2], self.fake.out = 0, 300, True
         rep = self.daemon.submit(self.daemon._startup_check)
         self.assertTrue(rep["output_on"] and not rep["turned_off"])
@@ -1504,13 +1499,13 @@ class AttendedDaemon(DaemonCase):
         self.assertIn("(left ON)", k.start_report_text(rep))
         self.assertTrue(any("output was ON at start" in e["message"] for e in self.events("startup")))
 
-    def test_l2_3_start_report_text_off_and_unknown(self):
+    def test_start_report_text_off_and_unknown(self):
         self.assertIn("output at start: OFF", k.start_report_text(
             {"output_on": False, "mode": "independent", "setpoints": sp(), "violations": [],
              "turned_off": False}))
         self.assertIn("unknown", k.start_report_text(None))
 
-    def test_l2_4_verified_off_is_reported_ok_even_if_a_later_step_fails(self):
+    def test_verified_off_is_reported_ok_even_if_a_later_step_fails(self):
         self.c.call("set", channel="2", v=300, i=20)
         self.c.call("out", on=True)
         real = self.daemon._refresh
@@ -1528,10 +1523,10 @@ class AttendedDaemon(DaemonCase):
         self.assertIsNone(self.daemon._pending_off)
 
 
-class AttendedMeasuredLive(DaemonCase):
+class MeasuredVoutGuard(DaemonCase):
     CFG = {"poll_hz": 50, "setpoint_every_s": 100}   # setpoints are (almost) never re-read
 
-    def test_l2_5_panel_knob_caught_by_measured_vout_before_setpoint_poll(self):
+    def test_panel_knob_caught_by_measured_vout_before_setpoint_poll(self):
         self.set_guard(guard({"all": {"max_cv": 500}}))
         self.c.call("set", channel="12", v=0, i=20)
         self.c.call("set", channel="2", v=300)
@@ -1546,7 +1541,7 @@ class AttendedMeasuredLive(DaemonCase):
         msg = off_events()
         self.assertTrue(msg and "CH2 measured 5.10 V is above the guard's 5.00 V" in msg[0], msg)
 
-    def test_l2_5_within_margin_is_not_a_violation(self):
+    def test_within_margin_is_not_a_violation(self):
         self.set_guard(guard({"all": {"max_cv": 500}}))
         self.c.call("set", channel="12", v=0, i=20)
         self.c.call("set", channel="2", v=500)
@@ -1555,7 +1550,7 @@ class AttendedMeasuredLive(DaemonCase):
         time.sleep(0.3)
         self.assertTrue(self.fake.out)
 
-    def test_l2_5_measured_units(self):
+    def test_measured_units(self):
         g = guard({"all": {"max_cv": 3100}}, mode="series")
         g["limits"]["all"]["max_cv"] = 1000
         m = {"vout1": 5.5, "iout1": 0, "vout2": 5.5, "iout2": 0}
@@ -1565,10 +1560,10 @@ class AttendedMeasuredLive(DaemonCase):
         self.assertEqual(k.measured_violations(None, "independent", m), [])
 
 
-class AttendedCli(DaemonCase):
+class StartReportCli(DaemonCase):
     run_cli = Cli.run_cli
 
-    def test_l2_3_daemon_start_prints_the_output_state(self):
+    def test_daemon_start_prints_the_output_state(self):
         tmp = tempfile.mkdtemp(prefix="k", dir="/tmp")
         env = dict(os.environ, KORAD_HOME=tmp)
         try:
@@ -1587,10 +1582,10 @@ class AttendedCli(DaemonCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ---- output bits, measured cross-check, OFF re-check, reconnect freshness (live)
+# ---- output bits, measured cross-check, OFF re-check, reconnect freshness
 
 class OutputBits(unittest.TestCase):
-    def test_f4_1_either_bit_means_output_on(self):
+    def test_either_bit_means_output_on(self):
         # 0x83: mains power-up with the output ON (bit 6 clear, bit 7 set), measured
         st = k.decode_status(0x83)
         self.assertTrue(st["output"])
@@ -1602,7 +1597,7 @@ class OutputBits(unittest.TestCase):
         self.assertFalse(k.decode_status(0x03)["output"])
         self.assertFalse(k.decode_status(0x33)["output"])
 
-    def test_f4_1_fake_single_bit_states(self):
+    def test_fake_single_bit_states(self):
         for bits, raw in ((0x80, "0x83"), (0x40, "0x43"), (0xC0, "0xc3")):
             f = k.FakeSerial()
             d = k.Korad(f)
@@ -1613,13 +1608,13 @@ class OutputBits(unittest.TestCase):
             self.assertEqual(st["raw"], raw)
             self.assertTrue(st["output"], raw)
 
-    def test_f4_1_out1_sets_both_bits_in_the_fake(self):
+    def test_out1_sets_both_bits_in_the_fake(self):
         f = k.FakeSerial()
         d = k.Korad(f)
         f.out_bits = 0x80
         self.assertTrue(d.set_output(True)["bit6"])
 
-    def test_f4_3_off_verification_needs_both_bits_clear(self):
+    def test_off_verification_needs_both_bits_clear(self):
         f = k.FakeSerial()
         d = k.Korad(f)
         f.out, f.out_bits = True, 0x80
@@ -1635,7 +1630,7 @@ class OutputBits(unittest.TestCase):
         self.assertEqual(cm.exception.code, "E_VERIFY")
         self.assertRegex(cm.exception.message, r"status 0x8[0-3]")
 
-    def test_f4_6_start_report_text_names_raw_status_and_measure(self):
+    def test_start_report_text_names_raw_status_and_measure(self):
         sp = {"v1": 0, "i1": 0, "v2": 100, "i2": 100}
         rep = {"output_on": True, "by_measure": False, "raw": "0x83", "mode": "independent",
                "setpoints": sp, "violations": [], "turned_off": False,
@@ -1653,14 +1648,14 @@ class OutputBitsDaemon(DaemonCase):
         self.fake.v[2], self.fake.i[2] = v2, 100
         self.fake.out, self.fake.out_bits = True, bits
 
-    def test_f4_1_bit7_only_output_is_on_and_guarded(self):
+    def test_bit7_only_output_is_on_and_guarded(self):
         self.set_guard(guard({"all": {"max_cv": 500, "max_ma": 200}}))
         self._power_up_on(900, 0x80)                    # 9 V, STATUS 0x83
         self.assertTrue(self.wait_for(lambda: not self.fake.out, 2))
         self.assertTrue(self.wait_for(
             lambda: any("turned OFF" in e["message"] for e in self.events("guard")), 2))
 
-    def test_f4_1_bit7_only_within_guard_shows_on(self):
+    def test_bit7_only_within_guard_shows_on(self):
         self._power_up_on(100, 0x80)
         self.assertTrue(self.wait_for(
             lambda: (self.c.call("state")["status"] or {}).get("raw") == "0x83", 2))
@@ -1669,7 +1664,7 @@ class OutputBitsDaemon(DaemonCase):
         self.assertTrue(st["bit7"])
         self.assertFalse(st["bit6"])
 
-    def test_f4_2_measured_voltage_counts_as_on_when_status_lies(self):
+    def test_measured_voltage_counts_as_on_when_status_lies(self):
         self._power_up_on(100, 0)                       # status reads OFF, 1 V at the terminals
         warn = lambda: [e for e in self.events("warning") if "ON by measured voltage" in e["message"]]
         self.assertTrue(self.wait_for(warn, 2))
@@ -1681,14 +1676,14 @@ class OutputBitsDaemon(DaemonCase):
             time.sleep(0.15)
         self.assertEqual(len(warn()), 1)                # one warning per episode
 
-    def test_f4_2_measured_on_breaking_the_guard_is_turned_off(self):
+    def test_measured_on_breaking_the_guard_is_turned_off(self):
         self.set_guard(guard({"all": {"max_cv": 500}}))
         self._power_up_on(900, 0)
         self.assertTrue(self.wait_for(lambda: not self.fake.out, 2))
         self.assertTrue(self.wait_for(
             lambda: any("turned OFF" in e["message"] for e in self.events("guard")), 2))
 
-    def test_f4_2_no_false_alarm_during_decay_then_off_rechecked(self):
+    def test_no_false_alarm_during_decay_then_off_rechecked(self):
         self.c.call("set", channel="2", v=300, i=20)
         self.c.call("out", on=True)
         self.c.call("out", on=False)
@@ -1702,7 +1697,7 @@ class OutputBitsDaemon(DaemonCase):
         self.assertIn("sending OUT0 again", still()[0]["message"])
         self.assertTrue(self.wait_for(lambda: not self.fake.out, 1))
 
-    def test_f4_3_two_failed_offs_warn(self):
+    def test_two_failed_offs_warn(self):
         self.c.call("set", channel="2", v=300, i=20)
         self.c.call("out", on=True)
         real = self.fake.write
@@ -1719,7 +1714,7 @@ class OutputBitsDaemon(DaemonCase):
         self.fake.write = real
         self.fake.out = False
 
-    def test_f4_5_status_waits_for_a_sample_after_reconnect(self):
+    def test_status_waits_for_a_sample_after_reconnect(self):
         with self.daemon.cache_cv:
             self.daemon.cache["opened_at"] = time.time() + 0.6
         out = k.Out(True, "status")
@@ -1729,7 +1724,7 @@ class OutputBitsDaemon(DaemonCase):
         self.assertGreater(time.monotonic() - t0, 0.4)
         self.assertEqual(out.warnings, [])
 
-    def test_f4_6_reconnect_event_names_output_on_and_raw(self):
+    def test_reconnect_event_names_output_on_and_raw(self):
         real_open = k.Daemon._open
 
         def fail_open(self_):
@@ -1752,14 +1747,14 @@ class OutputBitsDaemon(DaemonCase):
         self.assertIn("M1", msgs()[0])
 
 
-# ---- F4 items 7-10: hung port, stale sample, several matching nodes, forced stop (Windows sleep)
+# ---- hung port, stale sample, several matching nodes, forced stop (Windows sleep)
 
 class HungPort(DaemonCase):
     def setUp(self):
         super().setUp()
         self.daemon.WATCHDOG_S = 1.0
 
-    def test_f4_7_watchdog_closes_a_hung_port_and_reopens(self):
+    def test_watchdog_closes_a_hung_port_and_reopens(self):
         hung = self.fake
         hung.hang = True
         ev = lambda: [e["message"] for e in self.events("device") if "device hung: port closed" in e["message"]]
@@ -1767,7 +1762,7 @@ class HungPort(DaemonCase):
         self.assertTrue(self.wait_for(lambda: self.daemon.dev is not None and self.daemon.dev.port is not hung, 5))
         self.assertTrue(self.wait_for(lambda: self.c.call("state")["device"] == "present", 3))
 
-    def test_f4_7_out_off_on_a_hung_port_fails_fast_and_is_kept_pending(self):
+    def test_out_off_on_a_hung_port_fails_fast_and_is_kept_pending(self):
         self.c.call("set", channel="2", v=300, i=20)
         self.c.call("out", on=True)
         self.fake.hang = True
@@ -1777,7 +1772,7 @@ class HungPort(DaemonCase):
         self.assertEqual(e.code, "E_DEVICE")
         self.assertIn("applies this OFF", e.message)
 
-    def test_f4_7_serial_open_has_a_write_timeout(self):
+    def test_serial_open_has_a_write_timeout(self):
         import inspect
         self.assertIn("write_timeout", inspect.getsource(k.Daemon._open))
 
@@ -1788,14 +1783,14 @@ class StaleSample(unittest.TestCase):
                 "status": None, "measured": None, "setpoints": None, "guard_text": "guard: NONE",
                 "setpoints_t": None}
 
-    def test_f4_8_old_sample_while_present_is_an_error(self):
+    def test_old_sample_while_present_is_an_error(self):
         with self.assertRaises(k.KoradError) as cm:
             k._check_fresh(self._s(97))
         self.assertEqual(cm.exception.code, "E_DEVICE")
         self.assertIn("no fresh sample for 97 s", cm.exception.message)
         self.assertEqual(k.EXIT[cm.exception.code], 5)
 
-    def test_f4_8_fresh_sample_passes(self):
+    def test_fresh_sample_passes(self):
         k._check_fresh(self._s(0.5))
         k._check_fresh(self._s(2.5, hz="max"))
         k._check_fresh(dict(self._s(97), device="absent"))   # absent is reported elsewhere
@@ -1808,22 +1803,22 @@ class SeveralNodes(unittest.TestCase):
     def tearDown(self):
         k.find_ports = self._real
 
-    def test_f4_9_stale_node_is_skipped(self):
+    def test_stale_node_is_skipped(self):
         k.find_ports = lambda serial="", **kw: ["/dev/ttyACM0", "/dev/ttyACM1"]
         name, skipped = k.find_port("", probe=lambda n: n == "/dev/ttyACM1")
         self.assertEqual((name, skipped), ("/dev/ttyACM1", ["/dev/ttyACM0"]))
 
-    def test_f4_9_single_node_is_not_probed(self):
+    def test_single_node_is_not_probed(self):
         k.find_ports = lambda serial="", **kw: ["/dev/ttyACM3"]
         self.assertEqual(k.find_port("", probe=lambda n: self.fail("probed")), ("/dev/ttyACM3", []))
 
-    def test_f4_9_no_node_answers(self):
+    def test_no_node_answers(self):
         k.find_ports = lambda serial="", **kw: ["/dev/ttyACM0", "/dev/ttyACM1"]
         with self.assertRaises(k.KoradError) as cm:
             k.find_port("", probe=lambda n: False)
         self.assertIn("none answers", cm.exception.message)
 
-    def test_f4_9_probe_reads_the_identity(self):
+    def test_probe_reads_the_identity(self):
         f = k.FakeSerial()
         self.assertTrue(k.probe_korad("/dev/fake", opener=lambda n: f, timeout=0.3))
         dead = k.FakeSerial()
@@ -1848,7 +1843,7 @@ S(sys.argv[1], H).serve_forever()
 
 
 class ForcedStop(unittest.TestCase):
-    def test_f4_10_stop_terminates_a_stuck_daemon_and_exits_5(self):
+    def test_stop_terminates_a_stuck_daemon_and_exits_5(self):
         tmp = tempfile.mkdtemp(prefix="k", dir="/tmp")
         env_old = {x: os.environ.get(x) for x in ("KORAD_HOME", "KORAD_SOCKET")}
         os.environ["KORAD_HOME"] = tmp
